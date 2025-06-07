@@ -22,11 +22,11 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "pip install fastapi uvicorn alpaca-trade-api pydantic && python main.py"
+args = "python main.py"
 waitForPort = 8000
 
 [deployment]
-run = ["sh", "-c", "pip install fastapi uvicorn alpaca-trade-api pydantic && python main.py"]
+run = ["sh", "-c", "python main.py"]
 
 [[ports]]
 localPort = 8000

@@ -2,50 +2,39 @@ from pydantic import BaseModel, Field, validator
 from typing import Optional
 from datetime import datetime
 import re
+from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, create_engine
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+import os
+
+Base = declarative_base()
+
+class TradingSignal(Base):
+    """SQLAlchemy model for storing trading signals in database"""
+    __tablename__ = 'trading_signals'
+    
+    id = Column(Integer, primary_key=True, index=True)
+    action = Column(String(20), nullable=False)
+    symbol = Column(String(10), nullable=False)
+    strike = Column(Float, nullable=False)
+    expiry = Column(String(20), nullable=False)
+    premium = Column(Float, nullable=False)
+    quantity = Column(Integer, default=1)
+    status = Column(String(20), default='pending')
+    alpaca_order_id = Column(String(100), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    processed_at = Column(DateTime, nullable=True)
+    error_message = Column(String(500), nullable=True)
 
 class WebhookSignal(BaseModel):
     """Pydantic model for webhook signal validation"""
     
-    action: str = Field(
-        ...,
-        description="Trading action: sell_put or sell_call",
-        example="sell_put"
-    )
-    
-    symbol: str = Field(
-        ...,
-        description="Stock symbol (e.g., AAPL, MSFT)",
-        example="AAPL",
-        min_length=1,
-        max_length=10
-    )
-    
-    strike: float = Field(
-        ...,
-        description="Strike price of the option",
-        example=150.00,
-        gt=0
-    )
-    
-    expiry: str = Field(
-        ...,
-        description="Option expiry date in YYYY-MM-DD format",
-        example="2024-01-19"
-    )
-    
-    premium: float = Field(
-        ...,
-        description="Premium price for the option",
-        example=2.50,
-        gt=0
-    )
-    
-    quantity: Optional[int] = Field(
-        default=1,
-        description="Number of contracts (default: 1)",
-        example=1,
-        gt=0
-    )
+    action: str = Field(description="Trading action: sell_put or sell_call")
+    symbol: str = Field(description="Stock symbol (e.g., AAPL, MSFT)", min_length=1, max_length=10)
+    strike: float = Field(description="Strike price of the option", gt=0)
+    expiry: str = Field(description="Option expiry date in YYYY-MM-DD format")
+    premium: float = Field(description="Premium price for the option", gt=0)
+    quantity: Optional[int] = Field(default=1, description="Number of contracts (default: 1)", gt=0)
     
     @validator('action')
     def validate_action(cls, v):
@@ -101,7 +90,7 @@ class WebhookSignal(BaseModel):
         json_encoders = {
             datetime: lambda v: v.isoformat()
         }
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "action": "sell_put",
                 "symbol": "AAPL",
@@ -111,3 +100,21 @@ class WebhookSignal(BaseModel):
                 "quantity": 1
             }
         }
+
+# Database setup
+def get_database_url():
+    """Get database URL from environment variables"""
+    return os.getenv("DATABASE_URL")
+
+def create_db_engine():
+    """Create database engine"""
+    database_url = get_database_url()
+    if not database_url:
+        raise ValueError("DATABASE_URL environment variable not set")
+    return create_engine(database_url)
+
+def get_db_session():
+    """Get database session"""
+    engine = create_db_engine()
+    SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+    return SessionLocal()

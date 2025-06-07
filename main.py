@@ -1,10 +1,11 @@
 import os
 import logging
 from datetime import datetime
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, status, Depends
 from fastapi.responses import JSONResponse
 import alpaca_trade_api as tradeapi
-from models import WebhookSignal
+from models import WebhookSignal, TradingSignal, Base, create_db_engine, get_db_session
+from sqlalchemy.orm import Session
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -13,9 +14,17 @@ logger = logging.getLogger(__name__)
 # Initialize FastAPI app
 app = FastAPI(
     title="Wheel Strategy Bot",
-    description="Options trading webhook processor with Alpaca integration",
+    description="Options trading webhook processor with Alpaca integration and database logging",
     version="1.0.0"
 )
+
+# Initialize database
+try:
+    engine = create_db_engine()
+    Base.metadata.create_all(bind=engine)
+    logger.info("Database tables created successfully")
+except Exception as e:
+    logger.error(f"Failed to initialize database: {str(e)}")
 
 # Initialize Alpaca API client
 def get_alpaca_client():
@@ -48,6 +57,14 @@ def get_alpaca_client():
 # Global Alpaca client
 alpaca_client = get_alpaca_client()
 
+def get_db():
+    """Database dependency"""
+    db = get_db_session()
+    try:
+        yield db
+    finally:
+        db.close()
+
 @app.get("/")
 async def root():
     """Health check endpoint"""
@@ -60,142 +77,39 @@ async def root():
     }
 
 @app.post("/webhook")
-async def process_webhook(signal: WebhookSignal):
-    """Process incoming trading webhook signals"""
+async def process_webhook(signal: WebhookSignal, db: Session = Depends(get_db)):
+    data = await request.json()
+    action = data.get("action")
+    symbol = data.get("symbol")
+    strike = float(data.get("strike"))
+    expiry = data.get("expiry")  # Format: "2024-07-19"
+    premium = float(data.get("premium", 1.0))
+
+    if not all([action, symbol, strike, expiry]):
+        return {"error": "Missing parameters."}
+
+    # Build OCC-compliant option symbol
+    expiry_code = expiry.replace("-", "")[2:]  # "2024-07-19" → "240719"
+    strike_formatted = f"{int(strike * 1000):08d}"
+    right = "P" if action == "sell_put" else "C"
+    occ_symbol = f"{symbol}{expiry_code}{right}{strike_formatted}"
+
+    print(f"[INFO] Action: {action} | OCC Symbol: {occ_symbol}")
+
     try:
-        logger.info(f"Received webhook signal: {signal.dict()}")
-        
-        # Validate action
-        if signal.action not in ["sell_put", "sell_call"]:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Invalid action: {signal.action}. Supported actions: sell_put, sell_call"
-            )
-        
-        # Process the signal based on action
-        if signal.action == "sell_put":
-            result = await process_sell_put(signal)
-        elif signal.action == "sell_call":
-            result = await process_sell_call(signal)
-        
-        return JSONResponse(
-            status_code=status.HTTP_200_OK,
-            content={
-                "status": "success",
-                "message": f"Successfully processed {signal.action} signal",
-                "signal": signal.dict(),
-                "result": result,
-                "timestamp": datetime.now().isoformat()
-            }
+        # Submit Alpaca order
+        order = api.submit_order(
+            symbol=occ_symbol,
+            qty=1,
+            side="sell",
+            type="limit",
+            limit_price=premium,
+            time_in_force="gtc",
+            order_class="simple",
+            order_type="option"
         )
-        
-    except HTTPException:
-        raise
+        print(f"Order submitted: {order}")
+        return {"status": "success", "order": order._raw}
     except Exception as e:
-        logger.error(f"Error processing webhook: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Internal server error: {str(e)}"
-        )
-
-async def process_sell_put(signal: WebhookSignal):
-    """Process sell put signal"""
-    action_msg = f"Selling PUT for {signal.symbol} - Strike: ${signal.strike}, Expiry: {signal.expiry}, Premium: ${signal.premium}"
-    print(action_msg)
-    logger.info(action_msg)
-    
-    # If Alpaca client is available, attempt to place order
-    alpaca_result = None
-    if alpaca_client:
-        try:
-            alpaca_result = await place_options_order(signal, "put")
-        except Exception as e:
-            logger.error(f"Failed to place Alpaca order: {str(e)}")
-            alpaca_result = {"error": str(e)}
-    
-    return {
-        "action": "sell_put",
-        "symbol": signal.symbol,
-        "strike": signal.strike,
-        "expiry": signal.expiry,
-        "premium": signal.premium,
-        "alpaca_order": alpaca_result
-    }
-
-async def process_sell_call(signal: WebhookSignal):
-    """Process sell call signal"""
-    action_msg = f"Selling CALL for {signal.symbol} - Strike: ${signal.strike}, Expiry: {signal.expiry}, Premium: ${signal.premium}"
-    print(action_msg)
-    logger.info(action_msg)
-    
-    # If Alpaca client is available, attempt to place order
-    alpaca_result = None
-    if alpaca_client:
-        try:
-            alpaca_result = await place_options_order(signal, "call")
-        except Exception as e:
-            logger.error(f"Failed to place Alpaca order: {str(e)}")
-            alpaca_result = {"error": str(e)}
-    
-    return {
-        "action": "sell_call",
-        "symbol": signal.symbol,
-        "strike": signal.strike,
-        "expiry": signal.expiry,
-        "premium": signal.premium,
-        "alpaca_order": alpaca_result
-    }
-
-async def place_options_order(signal: WebhookSignal, option_type: str):
-    """Place options order via Alpaca API"""
-    try:
-        if not alpaca_client:
-            return {"error": "Alpaca client not initialized"}
-        
-        # Note: Alpaca's options trading API might have specific requirements
-        # This is a basic implementation that logs the order details
-        # You may need to adjust based on Alpaca's actual options API
-        
-        order_details = {
-            "symbol": signal.symbol,
-            "option_type": option_type,
-            "strike": signal.strike,
-            "expiry": signal.expiry,
-            "premium": signal.premium,
-            "side": "sell",
-            "order_type": "market",
-            "time_in_force": "day"
-        }
-        
-        logger.info(f"Would place options order: {order_details}")
-        
-        # For paper trading, we'll log the order instead of actually placing it
-        # since options trading API specifics may vary
-        return {
-            "status": "simulated",
-            "order_details": order_details,
-            "message": "Order logged for paper trading simulation"
-        }
-        
-    except Exception as e:
-        logger.error(f"Error placing options order: {str(e)}")
-        return {"error": str(e)}
-
-@app.get("/health")
-async def health_check():
-    """Detailed health check endpoint"""
-    return {
-        "service": "Wheel Strategy Bot",
-        "status": "healthy",
-        "alpaca_connected": alpaca_client is not None,
-        "timestamp": datetime.now().isoformat(),
-        "endpoints": {
-            "webhook": "/webhook (POST)",
-            "status": "/ (GET)",
-            "health": "/health (GET)"
-        }
-    }
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+        print(f"[ERROR] {e}")
+        return {"status": "error", "message": str(e)}
